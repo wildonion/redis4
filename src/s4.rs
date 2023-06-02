@@ -63,13 +63,13 @@ pub async fn start_server<F, A>(mut api: F) -> Result<(), Box<dyn std::error::Er
     /* ----------------------------------------------------------------------------------------------- */
     /* ----------------------------------------------------------------------------------------------- */
     
-    let rand_generator = Arc::new(tokio::sync::Mutex::new(ChaCha12Rng::from_entropy()));
+    let mut rand_generator = Arc::new(tokio::sync::Mutex::new(ChaCha12Rng::from_entropy()));
     let (mutex_data_sender, mut mutex_data_receiver) = tokio::sync::mpsc::channel::<Db>(SHARDS as usize);
-    let (map_shards_sender, mut map_shards_receiver) = tokio::sync::broadcast::channel::<Vec<Arc<tokio::sync::Mutex<Db>>>>(SHARDS as usize);
+    let (mut map_shards_sender, mut map_shards_receiver) = tokio::sync::broadcast::channel::<Vec<Arc<tokio::sync::Mutex<Db>>>>(SHARDS as usize);
     
 
     let send_sync_map = Arc::new(tokio::sync::Mutex::new(LAZY_STATIC_SHARED_DATA.clone())); //// no need to put in Mutex since we don't want to mutate it
-    let mutex_data_sender = mutex_data_sender.clone();      
+    let mut mutex_data_sender = mutex_data_sender.clone();      
   
     /*
         
@@ -125,7 +125,7 @@ pub async fn start_server<F, A>(mut api: F) -> Result<(), Box<dyn std::error::Er
                         
                         /* deserialize the packet comming from the socket connection */
                         let data = serde_json::from_slice::<Data>(&buffer[..size]).unwrap();
-                        let data_ = Arc::new(tokio::sync::Mutex::new(data));
+                        let mut data_ = Arc::new(tokio::sync::Mutex::new(data));
 
                         /* calling the api of this connection */
                         api(Request{}, Response{}).await.unwrap();
@@ -156,110 +156,154 @@ pub async fn start_server<F, A>(mut api: F) -> Result<(), Box<dyn std::error::Er
     /* waiting inside the eventloop to receive the shared data asyncly once the data sent to channel */
     tokio::select!{
         data = receiver.recv() => {
-            if let Some(d) = data{
+            if let Some(mut d) = data{
                 
                 /* pass the data to the s3 to store in ram */
-                /*
-
-                    waiting to receive the new shards from the channel 
-                    to update the current shard inside the whole app
-                    asyncly, since we're inside an eventloop this can 
-                    be done at any time inside the app thus we're sure
-                    that we'll always use an udpated version of the shards 
-
-                */
-                tokio::select!{ //// instead of using while let ... syntax on the receiver
-                    sent_shards = map_shards_receiver.recv() => {
-                        if let Ok(shards) = sent_shards{
-                            map_shards = shards; /* updating with the incoming shards */
-                            current_data_length = map_shards[0].lock().await.len();
-                        }
-                    }
-                }
-
-
-                /*
-
-                    after finding a free mutex we'll update it then send it to the 
-                    downside of the mpsc job queue channel in order to update the vector 
-                    of shards by selecting the largest mutex data, this must be done asyncly 
-                    since we don't know the time of the lock acquisition, it can happen any 
-                    time during the app and due to having a shard of mutex data we have to 
-                    update the whole shards with the latest data in a none blocking manner
-                    since there might be other mutex-es that are in a lock process.    
-                
-                */
-                tokio::spawn(async move{
-                    let generator = rand_generator.clone(); 
-                    for idx in 0..map_shards.clone().len(){
-                        match map_shards[idx].clone().try_lock(){
-                            Ok(mut gaurd) => {
-
-                                // generate random number
-                                let mut rng = generator.lock().await;
-                                let random = rng.to_owned().gen::<i32>();
-
-                                // udpate the gaurd by inserting a new random unique storage key
-                                let data_val = &d.lock().await.id; /* borrowing the data to prevent from moving in each iteration of the loop */
-                                let value = format!("value is {}", data_val);
-                                gaurd.insert((idx as i32) * random, value);
-
-                                // send the mutex to downside of the channel
-                                mutex_data_sender.send(gaurd.to_owned()).await.unwrap();
-
-                            },
-                            Err(e) => {
-                                // use other mutex instead
-                                continue;
-                            } 
-                        }
-                    }
-                });
                 
                 /* 
+                    if we pass a mutable pointer to the type to the method calls then by mutating the 
+                    pointer inside the method the value of that type outside the method will be mutated too.
 
-                    in here we're waiting to receive the mutex data
-                    from the channel asyncly in order to update shards
-                    based on the largest mutex data to remove forks.  
-
+                    currently map_shards and current_data_length will be mutated concurrently 
+                    thus we pass a mutable borrow to them to the sharded_shared_state method
                 */
-                tokio::spawn(async move{
-                    tokio::select!{ //// instead of using while let ... syntax on the receiver
-                        mutex_data = mutex_data_receiver.recv() => {
-                            if let Some(largest_data) = mutex_data{
-                                
-                                // check that this is the largest data
-                                if current_data_length < largest_data.len(){
-                                    
-                                    // update the whole shards with the largest_data
-                                    let new_shards = vec![Arc::new(tokio::sync::Mutex::new(largest_data)); SHARDS as usize];
+                sharded_shared_state(
+                    d,
+                    &mut map_shards,
+                    rand_generator, 
+                    mutex_data_sender,
+                    mutex_data_receiver,
+                    map_shards_sender,
+                    map_shards_receiver,
+                    &mut current_data_length,
+                ).await;
 
-                                    // broadcast the new shards to the channel so all receivers can use the updated version
-                                    map_shards_sender.send(new_shards).unwrap();
-                                    
-                                } else{
-
-                                    /* MEANS THAT NO MUTEX HAS BEEN MUTATED YET */
-                                    // ...
-                                }
-
-                            } else{
-                                
-                                /* SOMETHING WENT WRONG IN SENDING TO CHANNEL */
-                                // ...
-                            }    
-                        }
-                    }
-                });
-
+                /* 
+                    after this function execution we have a mutated and updated map_shards
+                    &mut current_data_length in this method since we've passed their mutable
+                    borrow to the sharded_shared_state method in which if the borrow or the 
+                    pointer gets mutated we have a mutated value of these types in this method.
+                */
             }
         }
     }
+
     /* ----------------------------------------------------------------------------------------------- */
     /* ----------------------------------------------------------------------------------------------- */
     /* ----------------------------------------------------------------------------------------------- */
 
 
     Ok(())
+
+}
+
+
+pub async fn sharded_shared_state(
+    data: Arc<tokio::sync::Mutex<Data>>,
+    map_shards: &mut Vec<Arc<tokio::sync::Mutex<HashMap<i32, String>>>>,
+    rand_generator: Arc<tokio::sync::Mutex<ChaCha12Rng>>, 
+    mutex_data_sender: mpsc::Sender<HashMap<i32, String>>,
+    mut mutex_data_receiver: mpsc::Receiver<HashMap<i32, String>>,
+    map_shards_sender: broadcast::Sender<Vec<Arc<tokio::sync::Mutex<HashMap<i32, String>>>>>,
+    mut map_shards_receiver: broadcast::Receiver<Vec<Arc<tokio::sync::Mutex<HashMap<i32, String>>>>>,
+    current_data_length: &mut usize,
+){
+
+
+    /*
+
+        waiting to receive the new shards from the channel 
+        to update the current shard inside the whole app
+        asyncly, since we're inside an eventloop this can 
+        be done at any time inside the app thus we're sure
+        that we'll always use an udpated version of the shards 
+
+    */
+    tokio::select!{ //// instead of using while let ... syntax on the receiver
+        sent_shards = map_shards_receiver.recv() => {
+            if let Ok(shards) = sent_shards{
+                *map_shards = shards; /* updating with the incoming shards */
+                let deref_map_shards = (*map_shards).clone();
+                *current_data_length = deref_map_shards[0].lock().await.len();
+            }
+        }
+    }
+
+
+    /*
+
+        after finding a free mutex we'll update it then send it to the 
+        downside of the mpsc job queue channel in order to update the vector 
+        of shards by selecting the largest mutex data, this must be done asyncly 
+        since we don't know the time of the lock acquisition, it can happen any 
+        time during the app and due to having a shard of mutex data we have to 
+        update the whole shards with the latest data in a none blocking manner
+        since there might be other mutex-es that are in a lock process.    
+    
+    */
+    let map_shards = map_shards.clone();
+    tokio::spawn(async move{
+        let generator = rand_generator.clone(); 
+        for idx in 0..map_shards.clone().len(){
+            match map_shards[idx].clone().try_lock(){
+                Ok(mut gaurd) => {
+
+                    // generate random number
+                    let mut rng = generator.lock().await;
+                    let random = rng.to_owned().gen::<i32>();
+
+                    // udpate the gaurd by inserting a new random unique storage key
+                    let data_val = &data.lock().await.id; /* borrowing the data to prevent from moving in each iteration of the loop */
+                    let value = format!("value is {}", data_val);
+                    gaurd.insert((idx as i32) * random, value);
+
+                    // send the mutex to downside of the channel
+                    mutex_data_sender.send(gaurd.to_owned()).await.unwrap();
+
+                },
+                Err(e) => {
+                    // use other mutex instead
+                    continue;
+                } 
+            }
+        }
+    });
+    
+    /* 
+
+        in here we're waiting to receive the mutex data
+        from the channel asyncly in order to update shards
+        based on the largest mutex data to remove forks.  
+
+    */
+    let current_data_length = current_data_length.clone();
+    tokio::spawn(async move{
+        tokio::select!{ //// instead of using while let ... syntax on the receiver
+            mutex_data = mutex_data_receiver.recv() => {
+                if let Some(largest_data) = mutex_data{
+                    
+                    // check that this is the largest data
+                    if current_data_length < largest_data.len(){
+                        
+                        // update the whole shards with the largest_data
+                        let new_shards = vec![Arc::new(tokio::sync::Mutex::new(largest_data)); SHARDS as usize];
+
+                        // broadcast the new shards to the channel so all receivers can use the updated version
+                        map_shards_sender.send(new_shards).unwrap();
+                        
+                    } else{
+
+                        /* MEANS THAT NO MUTEX HAS BEEN MUTATED YET */
+                        // ...
+                    }
+
+                } else{
+                    
+                    /* SOMETHING WENT WRONG IN SENDING TO CHANNEL */
+                    // ...
+                }    
+            }
+        }
+    });
 
 }

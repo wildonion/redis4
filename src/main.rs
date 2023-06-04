@@ -28,7 +28,7 @@ use crate::s4::*;
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>{
 
 
-
+    /* start an async and concurrent server to handle socket packets from clients concurrently */ 
     start_server(|req, res| async move{
         Ok(
             Response{}

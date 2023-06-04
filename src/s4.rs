@@ -158,7 +158,7 @@ pub async fn start_server<F, A>(mut api: F) -> Result<(), Box<dyn std::error::Er
         data = receiver.recv() => {
             if let Some(mut d) = data{
                 
-                /* pass the data to the s3 to store in ram */
+                /* pass the data to the s4 to store in ram */
                 
                 /* 
                     if we pass a mutable pointer to the type to the method calls then by mutating the 
@@ -167,7 +167,7 @@ pub async fn start_server<F, A>(mut api: F) -> Result<(), Box<dyn std::error::Er
                     currently map_shards and current_data_length will be mutated concurrently 
                     thus we pass a mutable borrow to them to the sharded_shared_state method
                 */
-                sharded_shared_state(
+                sharded_shared_state_storage(
                     d,
                     &mut map_shards,
                     rand_generator, 
@@ -198,7 +198,7 @@ pub async fn start_server<F, A>(mut api: F) -> Result<(), Box<dyn std::error::Er
 }
 
 
-pub async fn sharded_shared_state(
+pub async fn sharded_shared_state_storage(
     data: Arc<tokio::sync::Mutex<Data>>,
     map_shards: &mut Vec<Arc<tokio::sync::Mutex<HashMap<i32, String>>>>,
     rand_generator: Arc<tokio::sync::Mutex<ChaCha12Rng>>, 

@@ -13,6 +13,8 @@ use tokio::sync::mpsc;
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use log::{error, info};
+use dotenv::dotenv;
+use std::env;
 
 mod s4;
 use crate::s4::*;
@@ -27,13 +29,54 @@ use crate::s4::*;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>{
 
+    dotenv().expect("⚠️ .env file not found");
+    let io_buffer_size = env::var("IO_BUFFER_SIZE").expect("⚠️ no io buffer size variable set").parse::<u32>().unwrap() as usize; //// usize is the minimum size in os which is 32 bits
+    let redis_password = env::var("REDIS_PASSWORD").expect("⚠️ no redis password variable set");
+    let redis_host = std::env::var("REDIS_HOST").expect("⚠️ no redis host variable set");
+    let redis_conn_url = format!("redis://:{}@{}", redis_password, redis_host);
+    let redis_client = redis::Client::open(redis_conn_url.as_str()).unwrap();
+    let (redis_pubsub_msg_sender, mut redis_pubsubs_msg_receiver) = tokio::sync::mpsc::channel::<String>(io_buffer_size);
+    let mut redis_conn = redis_client.get_connection().unwrap();
+
+
+
+    tokio::spawn(async move{
+
+        while let Some(data) = redis_pubsubs_msg_receiver.recv().await{
+
+            // receiving data from the redis pubsub mpsc sender
+            // ...
+
+        }
+
+    });
+
+
+    tokio::spawn(async move{
+
+        /* we should constantly subscribing to the redis channel once we received the topics from channels */
+        loop{
+
+            let mut pubsub = redis_conn.as_pubsub();    
+            pubsub.subscribe("data").unwrap();
+
+            let msg = pubsub.get_message().unwrap();
+            let payload: String = msg.get_payload().unwrap();
+
+            info!("subscribed to data channel and received: {}", payload);
+            
+        }
+
+    });
+
+
 
     /* start an async and concurrent server to handle socket packets from clients concurrently */ 
     start_server(|req, res| async move{
         Ok(
             Response{}
         )
-    }).await
+    }, redis_pubsub_msg_sender.clone(), redis_client.clone()).await
 
 
 

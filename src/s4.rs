@@ -24,6 +24,8 @@
 */
 
 
+use redis::{RedisError, AsyncCommands};
+
 use crate::*;
 
 
@@ -52,7 +54,7 @@ pub struct Data{id: String}
 
 
 
-pub async fn start_server<F, A>(mut api: F) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>
+pub async fn start_server<F, A>(mut api: F, redis_pubsub_msg_sender: tokio::sync::mpsc::Sender<String>, redis_client: redis::Client) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>
     where F: FnMut(Request, Response) -> A + Send + Sync + 'static + Clone,
     A: futures::future::Future<Output=Result<Response, ()>> + Send + Sync + 'static
     {
@@ -78,7 +80,7 @@ pub async fn start_server<F, A>(mut api: F) -> Result<(), Box<dyn std::error::Er
         during the lock acquisition inside the app.
 
     */
-    let mut map_shards = vec![send_sync_map.clone(); SHARDS as usize];
+    let mut map_shards = vec![send_sync_map.clone(); SHARDS as usize]; /* filling the vector with 10 shards */
     let mut current_data_length = map_shards[0].lock().await.len();
     
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<Arc<tokio::sync::Mutex<Data>>>(1024);
@@ -108,10 +110,17 @@ pub async fn start_server<F, A>(mut api: F) -> Result<(), Box<dyn std::error::Er
             // different threads using tokio jobq channels
             // ...
 
+            /* cloning senable and syncable data here to not to lose their ownership in each iteration */
             let mut api = api.clone();
             let sender = sender.clone();
+            let redis_pubsub_msg_sender = redis_pubsub_msg_sender.clone();
+            let redis_client = redis_client.clone();
+
             
-            /* 
+            /*  
+                to avoid blocking issues we must put every heavy async task 
+                inside tokio spawn to be handled asyncly in the background.
+
                 also we're handling apis of each connection 
                 inside tokio green threadpool asyncly to avoid
                 halting issues
@@ -124,7 +133,21 @@ pub async fn start_server<F, A>(mut api: F) -> Result<(), Box<dyn std::error::Er
                     Ok(size) => { // &buffer[..size] gives us all the packets that socket server is received till now
                         
                         /* deserialize the packet comming from the socket connection */
-                        let data = serde_json::from_slice::<Data>(&buffer[..size]).unwrap();
+                        let mut data = serde_json::from_slice::<Data>(&buffer[..size]).unwrap();
+                        
+                        /* update data_ structure */
+                        data.id = uuid::Uuid::new_v4().to_string();
+                        
+                        /* sending data to the redis pubsub channel */
+                        info!("📢 publishing new data to redis pubsub [data] channel");
+                        let string_data = serde_json::to_string_pretty(&data).unwrap();
+                        let mut conn = redis_client.get_async_connection().await.unwrap();   
+                        let _: Result<_, RedisError> = conn.publish::<String, String, String>("data".to_string(), string_data.clone()).await;
+
+                        /* sending data to the redis pubsub mpsc channel */
+                        redis_pubsub_msg_sender.send(string_data.clone()).await;
+
+                        /* making the data type, sendable and syncable by putting it in Arc and Mutex */
                         let mut data_ = Arc::new(tokio::sync::Mutex::new(data));
 
                         /* calling the api of this connection */
@@ -165,7 +188,7 @@ pub async fn start_server<F, A>(mut api: F) -> Result<(), Box<dyn std::error::Er
                     pointer inside the method the value of that type outside the method will be mutated too.
 
                     currently map_shards and current_data_length will be mutated concurrently 
-                    thus we pass a mutable borrow to them to the sharded_shared_state method
+                    thus we've passed a mutable borrow to them to the sharded_shared_state method
                 */
                 sharded_shared_state_storage(
                     d,

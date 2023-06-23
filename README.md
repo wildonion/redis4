@@ -12,3 +12,5 @@ a very simple implementation of an in-memory data storage like redis which is ba
 * tokio spawn to handle incoming packets asyncly and concurrently
 * tokio mutex to acquire the lock on the shared data between tokio green threads asyncly
 * tokio jobq channels to move data between tokio green threads asyncly
+
+* redis for streaming over pubsub channels

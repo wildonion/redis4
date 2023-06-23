@@ -39,6 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>
     let mut redis_conn = redis_client.get_connection().unwrap();
 
 
+    /* 
+        for each async and heavy tasks we must use 
+        tokio::spawn(async move{}) channel to avoid 
+        blocking issues, stuck and halting situations 
+    */
+
 
     tokio::spawn(async move{
 
@@ -70,14 +76,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>
     });
 
 
+    tokio::spawn(async move{
 
-    /* start an async and concurrent server to handle socket packets from clients concurrently */ 
-    start_server(|req, res| async move{
-        Ok(
-            Response{}
-        )
-    }, redis_pubsub_msg_sender.clone(), redis_client.clone()).await
+        /* start an async and concurrent server to handle socket packets from clients concurrently */ 
+        start_server(|req, res| async move{
+            Ok(
+                Response{}
+            )
+        }, redis_pubsub_msg_sender.clone(), redis_client.clone()).await
+    
+    });
 
+
+
+    Ok(())
 
 
 }

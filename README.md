@@ -14,3 +14,7 @@ a very simple implementation of an in-memory data storage like redis which is ba
 * tokio jobq channels to move data between tokio green threads asyncly
 
 * redis for streaming over pubsub channels
+
+# 🚧 WIPs
+
+* implement proper sharding and replication algorithms like assigning each data of a shard to a slot owned by a node by sending them through the threads using jobq channels 

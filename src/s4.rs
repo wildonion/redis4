@@ -149,6 +149,14 @@ pub async fn start_server<F, A>(mut api: F, redis_pubsub_msg_sender: tokio::sync
 
                         /* making the data type, sendable and syncable by putting it in Arc and Mutex */
                         let mut data_ = Arc::new(tokio::sync::Mutex::new(data));
+    
+                        /* calling the api of this connection, return response and close the connection */
+                        // - a lazy response object and mutating it inside routes using mutex 
+                        // - returning a new response object everytime once the scoket gets disconnected (0 cost type)
+                        // let resp = api(Request{}, Response{}).await.unwrap();
+                        // let encoded_resp_object = serde_json::to_vec(&resp).unwrap();
+                        // stream.write_all(&encoded_resp_object).await.unwrap();
+                        // stream.shutdown().await;
 
                         /* calling the api of this connection */
                         api(Request{}, Response{}).await.unwrap();
